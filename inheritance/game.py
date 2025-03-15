@@ -122,12 +122,16 @@ class Player:
         self.active = True
         self.game = None
     
+    def build_if_not_lost(self):
+        if self.hand.empty():
+            self.active = False
+            return
+        self.build()
+
+    
     def play(self, round: str):
         if round == "build":
-            if self.hand.empty():
-                self.active = False
-                return
-            self.build()
+            self.build_if_not_lost()
         elif round == "activate":
             self.activate()
         else:
@@ -187,6 +191,10 @@ class Player:
             break
         return x, y, player.castle.cells[x][y]
 
+    def back_to_hand(self, tile: Tile) -> None:
+        self.hand.add(tile)
+
+
 
 class PlayerRandom(Player):
     def build(self):
@@ -199,7 +207,7 @@ class PlayerRandom(Player):
             player = random.choice(self.game.table.players)
             x, y, cell = Player.random_cell(player)
             if agent and cell.empty():
-                self.hand.add(played_tile)  # could not play - return to my hand to choose another
+                self.back_to_hand(played_tile)  # could not play - return to my hand to choose another
                 continue  # cannot replace
             if agent:
                 replaced_tile = cell.stack[-1]
@@ -239,7 +247,7 @@ class PlayerRandom(Player):
         if kind == "agent":
             return
         if kind == "builder":
-            self.build()
+            self.build_if_not_lost()
             return
         if kind == "scholar":
             card = self.game.reserve.draw()
@@ -259,9 +267,6 @@ class PlayerRandom(Player):
 
 
 class PlayerMakeHigher(Player):
-    def back_to_hand(self, tile: Tile) -> None:
-        self.hand.add(tile)
-
     def highest_cell(self) -> Tuple[int, int, CastleCell]:
         max_x_y_call = None
         for x, cell_line in enumerate(self.castle.cells):
@@ -402,26 +407,33 @@ class Game:
             player.print()
         self.cycle_count += 1
 
-def main():
+def game():
     PR = PlayerRandom
     PMH = PlayerMakeHigher
     players = [PMH("Alice"), PR("Bob"), PR("Charlie")]
     game = Game(players)
-    for i in range(100):
-        print(f"===== CYCLE {i} ======")
+    for cycle in range(100):
+        print(f"===== CYCLE {cycle} ======")
         try:
             more = game.run_game_cycle()
         except RuntimeError as ex:
             if "win!" in str(ex):
-                print(f"We have a winner: at round {i}", str(ex))
+                print(f"We have a winner: at round {cycle}", str(ex))
             else:
                 raise ex
             more = False
         if not more:
-            print(f"stopping at cycle {i}")
+            print(f"stopping at cycle {cycle}")
             break
         #input("next?")
+    return cycle + 1
 
+def main():
+    stats = list()
+    for game_i in range(100):
+        cycles = game()
+        stats.append(cycles)
+    print(f"avg cycles={sum(stats)/len(stats)} after {len(stats)}")
 
 if __name__ == "__main__":
     main()
