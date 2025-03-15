@@ -115,15 +115,18 @@ class Castle:
 
 
 class Player:
-    def __init__(self, name: str, game: "Game"):
+    def __init__(self, name: str):
         self.name = name
         self.hand = Hand()
         self.castle = Castle()
         self.active = True
-        self.game = game
+        self.game = None
     
     def play(self, round: str):
         if round == "build":
+            if self.hand.empty():
+                self.active = False
+                return
             self.build()
         elif round == "activate":
             self.activate()
@@ -131,10 +134,13 @@ class Player:
             raise ValueError(f"bad round {round}")
 
     def build(self):
-        pass
+        raise NotImplementedError()
 
     def activate(self):
-        pass
+        raise NotImplementedError()
+
+    def choose_tile_to_play(self) -> Tile:
+        return pop_random(self.hand.tiles)
 
     def print(self):
         # each tile is 8 characters wide so we can have "half" tile of 4 spaces. So we can print line 0 and
@@ -153,7 +159,7 @@ class Player:
                     text = "[" + " " * 6 + "]"
                 else:
                     tile_text = tile.print()
-                    text = f"[{tile_text}]"
+                    text = "[" * len(cell.stack) + f"{tile_text}]"
                 print(text, end="")
         need_to_activate = self.castle.count_tile_contacts()
         print("\nActivations in Castle: ", need_to_activate)
@@ -168,8 +174,7 @@ class Player:
 
     def win(self):
         raise RuntimeError(f"I win! {self.name}")
-
-class PlayerRandom(Player):
+    
     @staticmethod
     def random_cell(player) -> Tuple[int, int, CastleCell]:
         for _ in watchdog_loop(1000):
@@ -182,18 +187,17 @@ class PlayerRandom(Player):
             break
         return x, y, player.castle.cells[x][y]
 
+
+class PlayerRandom(Player):
     def build(self):
         assert self.active
-        if self.hand.empty():
-            self.active = False
-            return
         for _ in watchdog_loop(1000):  # loop for the case agent to skip over empty cells
             played_tile = self.choose_tile_to_play()
             agent = False
             if played_tile.kind == "agent":
                 agent = True
             player = random.choice(self.game.table.players)
-            x, y, cell = self.random_cell(player)
+            x, y, cell = Player.random_cell(player)
             if agent and cell.empty():
                 self.hand.add(played_tile)  # could not play - return to my hand to choose another
                 continue  # cannot replace
@@ -212,8 +216,100 @@ class PlayerRandom(Player):
                 print(f"{self.name} places [{played_tile.kind}] over [{over_kind}] at ({x}, {y})@{player.name}")
             break
 
-    def choose_tile_to_play(self) -> Tile:
-        return pop_random(self.hand.tiles)
+    def activate(self):
+        assert self.active
+        need_to_activate = self.castle.count_tile_contacts()
+        print(f"DEBUG>>> {self.name} activations: ", need_to_activate)
+        kinds_to_play = list(need_to_activate.keys())
+        random.shuffle(kinds_to_play)
+        for kind in kinds_to_play:
+            for i in range(need_to_activate[kind]):
+                self.play_activation(kind)
+                if not self.activate:
+                    return
+        tiles_to_return = list()
+        while len(self.hand.tiles) > MAX_HAND_TILES:
+            tiles_to_return.append(pop_random(self.hand.tiles))
+        if tiles_to_return:
+            print(f"Player {self.name} discarding: {tiles_to_return}")
+            self.game.reserve.extend(tiles_to_return)
+
+    def play_activation(self, kind: str):
+        print(f"DEBUG>>> player {self.name} plays activation {kind}")
+        if kind == "agent":
+            return
+        if kind == "builder":
+            self.build()
+            return
+        if kind == "scholar":
+            card = self.game.reserve.draw()
+            self.hand.add(card)
+            return
+        if kind == "troop":
+            for _ in watchdog_loop(1000):
+                player = random.choice(self.game.table.players)
+                x, y, cell = Player.random_cell(player)
+                if cell.empty():
+                    continue
+                taken = cell.stack.pop()
+                self.game.reserve.extend([taken])
+                print(f"{self.name} takes [{taken.kind}] from ({x}, {y})@{player.name}")
+                break
+            
+
+
+class PlayerMakeHigher(Player):
+    def back_to_hand(self, tile: Tile) -> None:
+        self.hand.add(tile)
+
+    def highest_cell(self) -> Tuple[int, int, CastleCell]:
+        max_x_y_call = None
+        for x, cell_line in enumerate(self.castle.cells):
+            for y, cell in enumerate(cell_line):
+                if cell is None:
+                    continue
+                n = len(cell.stack)
+                if max_x_y_call is None:
+                    max_x_y_call = (x, y, cell)
+                else:
+                    if n > len(max_x_y_call[2].stack):
+                        max_x_y_call = (x, y, cell)
+        return max_x_y_call
+
+    def build(self):
+        assert self.active
+        for _ in watchdog_loop(1000):  # loop for the case agent to skip over empty cells
+            played_tile = self.choose_tile_to_play()
+            agent = False
+            if played_tile.kind == "agent":
+                agent = True
+            if agent:
+                player = random.choice(self.game.table.players)
+                if player is self:
+                    self.back_to_hand(played_tile)
+                    continue
+                x, y, cell = self.random_cell(player)
+                if cell.empty():
+                    self.back_to_hand(played_tile)  # could not play - return to my hand to choose another
+                    continue  # cannot replace
+                replaced_tile = cell.stack[-1]
+                if replaced_tile.kind == "agent":
+                    self.back_to_hand(played_tile)
+                    continue  # no point in switching two agents
+                self.hand.add(replaced_tile)
+                cell.stack[-1] = played_tile
+                print(f"{self.name} places [agent] instead of [{replaced_tile.kind}] at ({x}, {y})@{player.name}")
+            else:
+                player = self
+                x, y, cell = self.highest_cell()
+                over_kind = "None"
+                if cell.top():
+                    over_kind = cell.top().kind
+                cell.stack.append(played_tile)
+                if len(cell.stack) >= MAX_CELL_HEIGHT:
+                    player.win()
+                print(f"{self.name} places [{played_tile.kind}] over [{over_kind}] at ({x}, {y})@{player.name}")
+            break
 
     def activate(self):
         assert self.active
@@ -254,12 +350,11 @@ class PlayerRandom(Player):
                 self.game.reserve.extend([taken])
                 print(f"{self.name} takes [{taken.kind}] from ({x}, {y})@{player.name}")
                 break
-            
 
 
 class Table:
-    def __init__(self, names: List[str], player_class, game):
-        self.players: List[Player] = [player_class(name, game) for name in names]
+    def __init__(self, players: List[Player]):
+        self.players = players
 
     def shift(self):
         player0 = self.players.pop(0)
@@ -267,9 +362,11 @@ class Table:
 
 
 class Game:
-    def __init__(self, names: List[str], player_class=Player):
+    def __init__(self, players: List[Player]):
         self.reserve = ReserveImpl()
-        self.table = Table(names, player_class, self)
+        for player in players:
+            player.game = self
+        self.table = Table(players)
         self.rounds: List[str] = ["build", "activate"]
         self.cur_round_index = 0
         self.cycle_count = 0
@@ -306,10 +403,20 @@ class Game:
         self.cycle_count += 1
 
 def main():
-    game = Game(["Alice", "Bob", "Charlie"], PlayerRandom)
+    PR = PlayerRandom
+    PMH = PlayerMakeHigher
+    players = [PMH("Alice"), PR("Bob"), PR("Charlie")]
+    game = Game(players)
     for i in range(100):
         print(f"===== CYCLE {i} ======")
-        more = game.run_game_cycle()
+        try:
+            more = game.run_game_cycle()
+        except RuntimeError as ex:
+            if "win!" in str(ex):
+                print(f"We have a winner: at round {i}", str(ex))
+            else:
+                raise ex
+            more = False
         if not more:
             print(f"stopping at cycle {i}")
             break
