@@ -6,6 +6,7 @@ TILE_KIND_COUNT = dict(troop=15, agent=20, builder=25, scholar=40)
 TILE_KIND_COLOR = dict(troop="yellow", agent="green", builder="red", scholar="blue")
 assert sum(TILE_KIND_COUNT.values()) == 100
 MAX_HAND_TILES = 10
+MAX_CELL_HEIGHT = 7
 
 class Tile:
     def __init__(self, kind: str):
@@ -165,6 +166,8 @@ class Player:
             print(f"  {tile.print()}", end=end)
         print()
 
+    def win(self):
+        raise RuntimeError(f"I win! {self.name}")
 
 class PlayerRandom(Player):
     @staticmethod
@@ -180,8 +183,10 @@ class PlayerRandom(Player):
         return x, y, player.castle.cells[x][y]
 
     def build(self):
+        assert self.active
         if self.hand.empty():
-            raise RuntimeError("I lost!")
+            self.active = False
+            return
         for _ in watchdog_loop(1000):  # loop for the case agent to skip over empty cells
             played_tile = self.choose_tile_to_play()
             agent = False
@@ -202,6 +207,8 @@ class PlayerRandom(Player):
                 if cell.top():
                     over_kind = cell.top().kind
                 cell.stack.append(played_tile)
+                if len(cell.stack) >= MAX_CELL_HEIGHT:
+                    player.win()
                 print(f"{self.name} places [{played_tile.kind}] over [{over_kind}] at ({x}, {y})@{player.name}")
             break
 
@@ -209,6 +216,7 @@ class PlayerRandom(Player):
         return pop_random(self.hand.tiles)
 
     def activate(self):
+        assert self.active
         need_to_activate = self.castle.count_tile_contacts()
         print(f"DEBUG>>> {self.name} activations: ", need_to_activate)
         kinds_to_play = list(need_to_activate.keys())
@@ -216,6 +224,8 @@ class PlayerRandom(Player):
         for kind in kinds_to_play:
             for i in range(need_to_activate[kind]):
                 self.play_activation(kind)
+                if not self.activate:
+                    return
         tiles_to_return = list()
         while len(self.hand.tiles) > MAX_HAND_TILES:
             tiles_to_return.append(pop_random(self.hand.tiles))
@@ -278,9 +288,17 @@ class Game:
         for self.cur_round_index, round in enumerate(self.rounds):
             print(f"----- round {round} -------")
             for self.cur_player_index, player in enumerate(self.table.players):
+                if not player.active:
+                    print(f"skipping {player.name}...")
+                    continue
                 player.play(round)
+                active_players = [p for p in self.table.players if p.active]
+                if len(active_players) <= 1:
+                    print(f"ALL LOST but {active_players[0].name} who is the winner!")
+                    return False
             self.print_table()
         self.table.shift()
+        return True
 
     def print_table(self):
         for player in self.table.players:
@@ -291,7 +309,10 @@ def main():
     game = Game(["Alice", "Bob", "Charlie"], PlayerRandom)
     for i in range(100):
         print(f"===== CYCLE {i} ======")
-        game.run_game_cycle()
+        more = game.run_game_cycle()
+        if not more:
+            print(f"stopping at cycle {i}")
+            break
         #input("next?")
 
 
