@@ -181,7 +181,7 @@ class Player:
     
     @staticmethod
     def random_cell(player) -> Tuple[int, int, CastleCell]:
-        for _ in watchdog_loop(1000):
+        for _ in watchdog_loop(10000):
             x = random.randrange(3)
             if x >= len(player.castle.cells):
                 continue
@@ -199,7 +199,7 @@ class Player:
 class PlayerRandom(Player):
     def build(self):
         assert self.active
-        for _ in watchdog_loop(1000):  # loop for the case agent to skip over empty cells
+        for _ in watchdog_loop(10000):  # loop for the case agent to skip over empty cells
             played_tile = self.choose_tile_to_play()
             agent = False
             if played_tile.kind == "agent":
@@ -254,7 +254,7 @@ class PlayerRandom(Player):
             self.hand.add(card)
             return
         if kind == "troop":
-            for _ in watchdog_loop(1000):
+            for _ in watchdog_loop(10000):
                 player = random.choice(self.game.table.players)
                 x, y, cell = Player.random_cell(player)
                 if cell.empty():
@@ -283,7 +283,7 @@ class PlayerMakeHigher(Player):
 
     def build(self):
         assert self.active
-        for _ in watchdog_loop(1000):  # loop for the case agent to skip over empty cells
+        for _ in watchdog_loop(10000):  # loop for the case agent to skip over empty cells
             played_tile = self.choose_tile_to_play()
             agent = False
             if played_tile.kind == "agent":
@@ -339,14 +339,14 @@ class PlayerMakeHigher(Player):
         if kind == "agent":
             return
         if kind == "builder":
-            self.build()
+            self.build_if_not_lost()
             return
         if kind == "scholar":
             card = self.game.reserve.draw()
             self.hand.add(card)
             return
         if kind == "troop":
-            for _ in watchdog_loop(1000):
+            for _ in watchdog_loop(10000):
                 player = random.choice(self.game.table.players)
                 x, y, cell = self.random_cell(player)
                 if cell.empty():
@@ -410,7 +410,7 @@ class Game:
 def game():
     PR = PlayerRandom
     PMH = PlayerMakeHigher
-    players = [PMH("Alice"), PR("Bob"), PR("Charlie")]
+    players = [PMH("Alice"), PMH("Bob"), PMH("Charlie"), PR("Daniel"), PR("Elon")]
     game = Game(players)
     for cycle in range(100):
         print(f"===== CYCLE {cycle} ======")
@@ -430,10 +430,10 @@ def game():
 
 def main():
     stats = list()
-    for game_i in range(100):
+    for game_i in range(1000):
         cycles = game()
         stats.append(cycles)
-    print(f"avg cycles={sum(stats)/len(stats)} after {len(stats)}")
+    print(f"avg cycles={sum(stats)/len(stats)} after {len(stats)} min {min(stats)} max {max(stats)}")
 
 if __name__ == "__main__":
     main()
