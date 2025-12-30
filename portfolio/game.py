@@ -1,9 +1,17 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from enum import Enum
 # from termcolor import colored
 def colored(text, color=None):
     return text
 import random
+
+VERBOSE = False
+
+
+def log(*args):
+    if VERBOSE:
+        print(*args)
+
 
 CHIP_KIND_COUNT = dict(mover=9, stacker=9, drawer=9, binder=9)
 CHIP_KIND_COLOR = dict(mover="yellow", stacker="green", drawer="red", binder="blue")
@@ -46,6 +54,9 @@ class Hand:
         self.chips: List[Chip] = list()
     def add(self, chip: Chip) -> None:
         self.chips.append(chip)
+        
+    def put(self, chips: List[Chip]):
+        self.chips.extend(chips)
 
 
 class Deck:
@@ -74,11 +85,10 @@ class MoveType(Enum):
     PLAY_FACE_UP = 4
 
 class Move:
-    def __init__(self, move_type: MoveType, chip: Chip = None, target_pos: int = -1, extra_data=None):
+    def __init__(self, move_type: MoveType, chip: Optional[Chip] = None, target_pos: int = -1):
         self.move_type = move_type
         self.chip = chip
         self.target_pos = target_pos # 0..3
-        self.extra_data = extra_data # For Yellow chip: (from_pos, to_pos) tuple
 
 
 class Board:
@@ -116,12 +126,23 @@ class Player:
     def get_move(self, board: Board) -> Move:
         raise NotImplementedError()
 
+    def get_mover_followup(self, board: Board) -> Tuple[int, int]:
+        """Returns (from_pos, to_pos) for Yellow chip move"""
+        raise NotImplementedError()
+        
+    def get_drawer_followup(self, board: Board) -> Tuple[Chip, int]:
+        """Returns (chip_to_play_face_down, target_pos) for Red chip move"""
+        raise NotImplementedError()
+
     def _draft_choose_3(self, draft_batch_6: List[Chip]) -> Tuple[List[Chip], List[Chip]]:
         raise NotImplementedError()  # implement by strategy
 
     def draw_holdings(self):
         self.deck.shuffle()
         self.holdings.put(self.deck.draw(3))
+    
+    def draw_hand(self, count: int):
+        self.hand.put(self.deck.draw(count))
     
     
         
@@ -150,39 +171,43 @@ class PlayerRandom(Player):
     
     def get_move(self, board: Board) -> Move:
         # Check if we should check (10% chance if hand is low? or just random)
-        if random.random() < 0.1:
+        if not self.hand.chips or random.random() < 0.1:
              return Move(MoveType.CHECK)
-        
-        # Try to play a chip
-        if not self.hand.chips:
-             return Move(MoveType.CHECK)
-             
+
         chip = self.hand.chips[0] # Take first for now, or random
         
         # Randomly choose play type
         action_type = random.choice([MoveType.DISCARD, MoveType.PLAY_FACE_DOWN, MoveType.PLAY_FACE_UP])
         
         if action_type == MoveType.DISCARD:
-             return Move(MoveType.DISCARD, chip)
-             
+             return Move(MoveType.DISCARD, chip)    
         # Pick a stack
         target_pos = random.randint(0, 3)
-        
-        if action_type == MoveType.PLAY_FACE_DOWN:
-             return Move(MoveType.PLAY_FACE_DOWN, chip, target_pos)
-             
-        if action_type == MoveType.PLAY_FACE_UP:
-             # Handle constraints for Yellow
-             extra_data = None
-             if chip.kind == "mover": # Yellow
-                 # Need to pick a source and dest
-                 # Simplified random logic: pick any occupied stack to move FROM, and any neighbor TO
-                 # This needs the board state to be valid.
-                 # For now, let's just return check if board is empty, else try to move
-                 pass # Logic to be added
-             return Move(MoveType.PLAY_FACE_UP, chip, target_pos, extra_data)
+        assert action_type in [MoveType.PLAY_FACE_DOWN, MoveType.PLAY_FACE_UP]
+        return Move(action_type, chip, target_pos)
 
-        return Move(MoveType.CHECK)
+        
+    def get_mover_followup(self, board: Board) -> Tuple[int, int]:
+        # Simplified random logic: pick any occupied stack to move FROM, and any neighbor TO
+        # Neighbors map (simplified 2x2 grid: 0 1 / 2 3)
+        neighbors_map = {0: [1, 2], 1: [0, 3], 2: [0, 3], 3: [1, 2]}
+        
+        # Find all valid source stacks (not empty)
+        valid_sources = [i for i, stack in enumerate(board.stacks) if stack]
+        if not valid_sources:
+            return (-1, -1) # No valid move
+            
+        src = random.choice(valid_sources)
+        dst = random.choice(neighbors_map[src])
+        return (src, dst)
+
+    def get_drawer_followup(self, board: Board) -> Tuple[Chip, int]:
+        # Play a random chip from hand face down to a random pos
+        if not self.hand.chips:
+             raise RuntimeError("Hand empty in get_drawer_followup but guaranteed to have drawn")
+        chip = random.choice(self.hand.chips)
+        target_pos = random.randint(0, 3)
+        return (chip, target_pos)
 
 
 class Game:
@@ -193,6 +218,8 @@ class Game:
         self.active_player_idx = 0
         self.players_checked = [False, False]
         self.finished = False
+        self.scores: Dict[str, int] = {}
+        self.winner: Optional[str] = None
 
     @property
     def current_player(self) -> Player:
@@ -217,67 +244,67 @@ class Game:
         player = self.current_player
         if self.players_checked[self.active_player_idx]:
             return
-
         move = player.get_move(self.board)
         self.execute_move(move, player)
 
     def execute_move(self, move: Move, player: Player):
         if move.move_type == MoveType.CHECK:
+            log(f"  Player {player.name}: Check")
             self.players_checked[self.active_player_idx] = True
             return
-
         elif move.move_type == MoveType.DISCARD:
+            log(f"  Player {player.name}: Discard {move.chip}")
             # Just remove from hand, effectively discard
-            if move.chip in player.hand.chips:
-                player.hand.chips.remove(move.chip)
+            assert move.chip in player.hand.chips
+            player.hand.chips.remove(move.chip)
+            # Currently not tracking the "trash pile"
             return
-
         elif move.move_type == MoveType.PLAY_FACE_DOWN:
-             if move.chip in player.hand.chips:
-                 player.hand.chips.remove(move.chip)
-                 move.chip.is_hidden = True
-                 self.board.stacks[move.target_pos].append(move.chip)
-             return
-
+            assert move.chip in player.hand.chips
+            player.hand.chips.remove(move.chip)
+            move.chip.is_hidden = True
+            self.board.stacks[move.target_pos].append(move.chip)
+            log(f"  Player {player.name}: Play Face DOWN at {move.target_pos} (chip hidden)")
+            return
         elif move.move_type == MoveType.PLAY_FACE_UP:
-             if move.chip in player.hand.chips:
-                 player.hand.chips.remove(move.chip)
-                 move.chip.is_hidden = False
-                 self.board.stacks[move.target_pos].append(move.chip)
-                 
-                 # Special effects
-                 if move.chip.kind == "mover": # Yellow
-                     # Logic for moving: user should have provided extra_data=(from_pos, to_pos)
-                     # Validation required (neighbor, etc) - for now assuming PlayerRandom handles it or we skip
-                     if move.extra_data:
-                         src, dst = move.extra_data
-                         if 0 <= src < 4 and 0 <= dst < 4 and self.board.stacks[src]:
-                             moved_chip = self.board.stacks[src].pop()
-                             self.board.stacks[dst].append(moved_chip)
-                 
-                 elif move.chip.kind == "drawer": # Red
-                     # Draw a card
-                     if player.deck.chips:
-                        new_chips = player.deck.draw(1)
-                        player.hand.chips.extend(new_chips)
-                        # Force play face down
-                        # We need to ask player for another move, or simpler: just play it randomly for now?
-                        # Rule says "must play face down". 
-                        # Ideally ask player.get_move() again with constraint? 
-                        # For simulation, let's just force the LAST card drawn to be played at Random pos
-                        if new_chips:
-                            forced_chip = new_chips[0]
-                            forced_pos = random.randint(0, 3) # Simplified
-                            player.hand.chips.remove(forced_chip)
-                            forced_chip.is_hidden = True
-                            self.board.stacks[forced_pos].append(forced_chip)
+            assert move.chip in player.hand.chips
+            player.hand.chips.remove(move.chip)
+            move.chip.is_hidden = False
+            self.board.stacks[move.target_pos].append(move.chip)
+            log(f"  Player {player.name}: Play Face UP {move.chip} at {move.target_pos}")
+            
+            # Special effects
+            if move.chip.kind == "mover": # Yellow
+                # Logic for moving: user callback
+                src, dst = player.get_mover_followup(self.board)
+                assert 0 <= src < 4 and 0 <= dst < 4 and self.board.stacks[src]
+                # Validate neighbor (optional but good)
+                neighbors_map = {0: [1, 2], 1: [0, 3], 2: [0, 3], 3: [1, 2]}
+                assert dst in neighbors_map.get(src, [])
+                moved_chip = self.board.stacks[src].pop()
+                self.board.stacks[dst].append(moved_chip)
+
+            elif move.chip.kind == "drawer": # Red
+                # Draw a card
+                if not player.deck.chips:
+                    return  # no cards to draw
+                player.draw_hand(1)
+                
+                # Get follow-up move from player
+                chip_to_play, pos_to_play = player.get_drawer_followup(self.board)
+                
+                # Validate and execute
+                assert chip_to_play in player.hand.chips
+                player.hand.chips.remove(chip_to_play)
+                chip_to_play.is_hidden = True
+                self.board.stacks[pos_to_play].append(chip_to_play)
 
     def calculate_score(self) -> Dict[str, int]:
         scores = {}
         for player in self.players:
             score = 0
             # Holdings counts
-            holdings_counts = {}
+            holdings_counts: Dict[str, int] = {}
             for chip in player.holdings.chips:
                 holdings_counts[chip.kind] = holdings_counts.get(chip.kind, 0) + 1
             
@@ -306,6 +333,18 @@ class Game:
                 multiplier = holdings_counts.get(top_chip.kind, 0)
                 score += chip_score * multiplier
             scores[player.name] = score
+        
+        self.scores = scores
+        # Determine winner
+        p0 = self.players[0].name
+        p1 = self.players[1].name
+        if scores[p0] > scores[p1]:
+            self.winner = p0
+        elif scores[p1] > scores[p0]:
+            self.winner = p1
+        else:
+            self.winner = None # Tie
+            
         return scores
 
     def cleanup_board(self):
@@ -353,42 +392,39 @@ class Match:
         
         # Initial draw for Game 1
         for p in self.players:
-             p.draw_holdings() # Choose 3 for holdings per rules? 
-             # Wait, rules say: "choose 3 chips that will be Scoring rack... remaining 15 shuffled to be deck... draw 7"
-             # My Player.draft_3_from_6 handles putting into deck.
-             # I need to separate holdings from deck.
-             # Let's assume draft put everything in Deck?
-             # Player.draft_3_from_6 implementation: `self.deck.put(keep)`
-             # So deck has 18 chips.
-             # I need to pick 3 for holdings.
-             p.draw_holdings() # Helper I defined: `self.holdings.put(self.deck.draw(3))`
-             p.hand.chips.extend(p.deck.draw(7))
+             p.draw_holdings()
+             p.draw_hand(7)
 
-        match_scores = []
-        
         # Game 1
+        log("=== Starting Game 1 ===")
         self.stage = MatchStage.GAME1
         game1 = Game(self)
         self.games.append(game1)
         game1.run_game()
-        match_scores.append(game1.calculate_score())
-        # print(f"Game 1 Scores: {match_scores[-1]}")
+        game1.calculate_score()
+        log(f"Game 1 Scores: {game1.scores}, Winner: {game1.winner}")
         game1.cleanup_board()
         
         # Draw for Game 2
         for p in self.players:
             count = min(3, len(p.deck))
-            p.hand.chips.extend(p.deck.draw(count))
+            p.draw_hand(count)
             
         # Game 2
         self.stage = MatchStage.GAME2
         game2 = Game(self)
         self.games.append(game2)
         game2.run_game()
-        match_scores.append(game2.calculate_score())
-        # print(f"Game 2 Scores: {match_scores[-1]}")
+        game2.calculate_score()
+        log(f"Game 2 Scores: {game2.scores}, Winner: {game2.winner}")
         game2.cleanup_board()
         
+        # Check termination
+        match_winner = self._check_match_winner()
+        if match_winner:
+             log(f"Match End! Match Winner: {match_winner}")
+             return
+             
         # Draw for Game 3
         for p in self.players:
              count = min(3, len(p.deck))
@@ -399,12 +435,45 @@ class Match:
         game3 = Game(self)
         self.games.append(game3)
         game3.run_game()
-        match_scores.append(game3.calculate_score())
-        # print(f"Game 3 Scores: {match_scores[-1]}")
+        game3.calculate_score()
+        log(f"Game 3 Scores: {game3.scores}, Winner: {game3.winner}")
+        
+        match_winner = self._check_match_winner()
+        if not match_winner:
+            match_winner = "Tie"
+        log(f"Match End! Match Winner: {match_winner}")
+
+    def _check_match_winner(self) -> Optional[str]:
+        p0 = self.players[0].name
+        p1 = self.players[1].name
+        wins = {p0: 0, p1: 0}
+        ties = 0
+        
+        for game in self.games:
+            if game.winner == p0:
+                wins[p0] += 1
+            elif game.winner == p1:
+                wins[p1] += 1
+            else:
+                ties += 1
+        
+        if wins[p0] >= 2: return p0
+        if wins[p1] >= 2: return p1
+        if wins[p0] == 1 and ties >= 1: return p0
+        if wins[p1] == 1 and ties >= 1: return p1
+        
+        if len(self.games) == 3:
+            if wins[p0] > wins[p1]: return p0
+            if wins[p1] > wins[p0]: return p1
+            return None
+            
+        return None
         
     
 def main():
-    for game_i in range(1000): # Run 1000 for stats
+    global VERBOSE
+    VERBOSE = True
+    for game_i in range(1): # Run 1000 for stats
         match = Match()
         match.run_match()
 
