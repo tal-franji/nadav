@@ -6,6 +6,8 @@ def colored(text, color=None):
 import random
 
 VERBOSE = False
+VERBOS_TURN_BY_TURN = False
+SNAPSHOT_SEP = "\n"
 
 
 def log(*args):
@@ -40,29 +42,29 @@ def watchdog_loop(max_iter: int):
     raise RuntimeError("Watchdog max iter exceeded")
 
 class Holdings:
-    def __init__(self):
+    def __init__(self) -> None:
         # 3 chips
         self.chips: List[Chip] = list()
-    def put(self, chips: List[Chip]):
+    def put(self, chips: List[Chip]) -> None:
         assert len(chips) == 3
         self.chips = chips[:]
 
 
 class Hand:
-    def __init__(self):
+    def __init__(self) -> None:
         # 0..15 chips. Hand chips are taken from the player's deck. Deck was created in the draft stage.
         self.chips: List[Chip] = list()
     def add(self, chip: Chip) -> None:
         self.chips.append(chip)
         
-    def put(self, chips: List[Chip]):
+    def put(self, chips: List[Chip]) -> None:
         self.chips.extend(chips)
 
 
 class Deck:
     """Deck blonging to a player. Deck is created in the draft stage.
     From the deck the player takes chips to the Hand and for the Holdings."""
-    def __init__(self):
+    def __init__(self) -> None:
         # 18 chips (later 3 move to Holdings)
         self.chips: List[Chip] = list()
     def draw(self, count: int) -> List[Chip]:
@@ -70,7 +72,7 @@ class Deck:
         result = self.chips[:count]
         self.chips = self.chips[count:]
         return result
-    def shuffle(self):
+    def shuffle(self) -> None:
         random.shuffle(self.chips)
     def __len__(self):
         return len(self.chips)
@@ -85,7 +87,8 @@ class MoveType(Enum):
     PLAY_FACE_UP = 4
 
 class Move:
-    def __init__(self, move_type: MoveType, chip: Optional[Chip] = None, target_pos: int = -1):
+    def __init__(self, move_type: MoveType, 
+    chip: Optional[Chip] = None, target_pos: int = -1) -> None:
         self.move_type = move_type
         self.chip = chip
         self.target_pos = target_pos # 0..3
@@ -93,12 +96,31 @@ class Move:
 
 class Board:
     """Board belongs to the match and spans 2-3 games."""
-    def __init__(self):
+    def __init__(self) -> None:
         # a 2X2 matrix of stacks of chips
         # representation as list of list.
         # self.stacks[0] is position top left, [1] top-right, [2] bottom-left, [3] bottom-right
         self.stacks: List[List[Chip]] = [[] for _ in range(4)]
         
+    def str_status(self, sep="\n"):
+        # Order: TL(0), TR(1), BR(3), BL(2)
+        labels = ["TL", "TR", "BR", "BL"]
+        indices = [0, 1, 3, 2]
+        result = ""
+        
+        for label, idx in zip(labels, indices):
+            stack = self.stacks[idx]
+            chips_str = ""
+            for chip in stack:
+                c = CHIP_KIND_COLOR[chip.kind][0]
+                if chip.is_hidden:
+                    c = c.lower()
+                else:
+                    c = c.upper()
+                chips_str += c
+            result += f"{label}>{chips_str}{sep}"
+        
+        return result
 
 class Player:
     """Match contains two players. This class may be inherited to implement different strategies"""
@@ -143,25 +165,10 @@ class Player:
     
     def draw_hand(self, count: int):
         self.hand.put(self.deck.draw(count))
-    
-    
-        
-    
 
-# match (draft, game(2..3), turn(0..), )
-"""
-{match:
-    [
-    {draft: ""}
-    {games: [
-       {"game":
-          [
-          {"turns" :[],
-          "scoring": "",
-          "clear": ""}
-          ]
-      ]}]}
-"""
+    def consider_update_holdings(self):
+        raise NotImplementedError()
+
 
 class PlayerRandom(Player):
     def _draft_choose_3(self, draft_batch_6: List[Chip]) -> Tuple[List[Chip], List[Chip]]:
@@ -208,7 +215,14 @@ class PlayerRandom(Player):
         chip = random.choice(self.hand.chips)
         target_pos = random.randint(0, 3)
         return (chip, target_pos)
-
+    
+    def consider_update_holdings(self):
+        if random.random() < (1.0 - 0.4):
+            return  # do not change holdings      
+        self.deck.chips.extend(self.holdings.chips)
+        self.holdings.chips.clear()
+        self.draw_holdings()
+        
 
 class Game:
     def __init__(self, match: "Match"):
@@ -225,10 +239,30 @@ class Game:
     def current_player(self) -> Player:
         return self.players[self.active_player_idx]
 
+    def snapshot_game(self, sep="\n") -> str:
+        result = ""
+        result += f"GM>{self.match.stage.value - 1}{sep}"
+        for p in self.players:
+            # HD
+            hd_str = ""
+            for c in sorted(p.hand.chips, key=lambda c: c.kind):
+                 hd_str += CHIP_KIND_COLOR[c.kind][0].upper()
+            result += f"hand({p.name})>{hd_str}{sep}"
+            
+            # HO
+            ho_str = ""
+            for c in sorted(p.holdings.chips, key=lambda c: c.kind):
+                 ho_str += CHIP_KIND_COLOR[c.kind][0].upper()
+            result += f"HOLD({p.name})>{ho_str}{sep}"
+            
+        result += self.board.str_status(sep)
+        return result
+
     def run_game(self):
         while not self.finished:
             self.play_turn()
-            
+            if VERBOSE and VERBOS_TURN_BY_TURN:
+                print(self.snapshot_game(SNAPSHOT_SEP))
             # Check if game is over (both checked)
             if all(self.players_checked):
                 self.finished = True
@@ -367,7 +401,7 @@ class MatchStage(Enum):
 
 class Match:
     """Represent a set of 2-3 games. After two games - if there is a tie - a third game is played."""
-    def __init__(self):
+    def __init__(self) -> None:
         self.players = [PlayerRandom("Alice"), PlayerRandom("Bob")]
         self.games: List[Game] = list()
         self.board = Board()
@@ -402,9 +436,15 @@ class Match:
         self.games.append(game1)
         game1.run_game()
         game1.calculate_score()
+        log(game1.snapshot_game(";"))
         log(f"Game 1 Scores: {game1.scores}, Winner: {game1.winner}")
         game1.cleanup_board()
         
+        if not game1.winner:
+            # in case of tie - choose new hand
+            for p in self.players:
+                p.consider_update_holdings()
+            
         # Draw for Game 2
         for p in self.players:
             count = min(3, len(p.deck))
@@ -416,6 +456,7 @@ class Match:
         self.games.append(game2)
         game2.run_game()
         game2.calculate_score()
+        log(game2.snapshot_game(";"))
         log(f"Game 2 Scores: {game2.scores}, Winner: {game2.winner}")
         game2.cleanup_board()
         
@@ -425,6 +466,10 @@ class Match:
              log(f"Match End! Match Winner: {match_winner}")
              return
              
+        if not game1.winner:
+            # in case of tie - choose new hand
+            for p in self.players:
+                p.consider_update_holdings()
         # Draw for Game 3
         for p in self.players:
              count = min(3, len(p.deck))
@@ -436,7 +481,8 @@ class Match:
         self.games.append(game3)
         game3.run_game()
         game3.calculate_score()
-        log(f"Game 3 Scores: {game3.scores}, Winner: {game3.winner}")
+        score_str = ";".join([f"score({p.name})>{game3.scores[p.name]}" for p in self.players])
+        log(game3.snapshot_game(";") + score_str)
         
         match_winner = self._check_match_winner()
         if not match_winner:
@@ -473,7 +519,7 @@ class Match:
 def main():
     global VERBOSE
     VERBOSE = True
-    for game_i in range(1): # Run 1000 for stats
+    for game_i in range(5000): # Run 1000 for stats
         match = Match()
         match.run_match()
 
